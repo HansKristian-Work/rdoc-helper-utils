@@ -42,7 +42,7 @@ def mash_callback(ctx : qrd.CaptureContext, data):
 
 def register(version : str, ctx : qrd.CaptureContext):
     print('Loading masher for version {}'.format(version))
-    ctx.Extensions().RegisterWindowMenu(qrd.WindowMenu.Window, ["Open Mash EDID button"], mash_callback)
+    ctx.Extensions().RegisterWindowMenu(qrd.WindowMenu.Window, ["Open Mash EID button"], mash_callback)
 
 def unregister():
     print('Unregistering masher')
