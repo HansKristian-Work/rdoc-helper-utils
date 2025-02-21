@@ -1,0 +1,46 @@
+From d3e8c715cba9eb306ea2c775946dac2257926381 Mon Sep 17 00:00:00 2001
+From: Hans-Kristian Arntzen <post@arntzen-software.no>
+Date: Tue, 18 Feb 2025 15:43:47 +0100
+Subject: [PATCH] Hacks for self-capture.
+
+---
+ renderdoc/replay/replay_controller.cpp | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/renderdoc/replay/replay_controller.cpp b/renderdoc/replay/replay_controller.cpp
+index 0830a74c6..63d5b79fb 100644
+--- a/renderdoc/replay/replay_controller.cpp
++++ b/renderdoc/replay/replay_controller.cpp
+@@ -81,7 +81,28 @@ void ReplayController::SetFrameEvent(uint32_t eventId, bool force)
+     for(size_t i = 0; i < m_Outputs.size(); i++)
+       m_Outputs[i]->SetFrameEvent(eventId);
+ 
+-    m_pDevice->ReplayLog(eventId, eReplay_OnlyDraw);
++    {
++      struct AUTOID
++      {
++        AUTOID()
++        {
++          if (const char *env = getenv("RDOC_CAPTURE_EID"))
++            eid = strtoul(env, nullptr, 0);
++        }
++        unsigned eid = -1;
++      };
++
++      static AUTOID autoid;
++
++      if(autoid.eid == eventId)
++        RENDERDOC_StartSelfHostCapture("librdocself.so");
++
++      m_pDevice->ReplayLog(eventId, eReplay_OnlyDraw);
++
++      if(autoid.eid == eventId)
++        RENDERDOC_EndSelfHostCapture("librdocself.so");
++    }
++
+     FatalErrorCheck();
+ 
+     FetchPipelineState(eventId);
+-- 
+2.48.1
+
