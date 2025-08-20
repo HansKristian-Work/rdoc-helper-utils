@@ -1,0 +1,9 @@
+{
+	"extension_api": 1,
+	"name": "D3D12 Replayer Exporter",
+	"version": "1.0",
+	"minimum_renderdoc": "1.36",
+	"description": "Exports a single dispatch capture useful for D3D12 Replayer tool",
+	"author": "Hans-Kristian Arntzen <post@arntzen-software.no>",
+	"url": "https://github.com/HansKristian-Work/rdoc-helper-utils"
+}
