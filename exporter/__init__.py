@@ -76,7 +76,7 @@ def to_view_type(view_type):
         case rd.TextureType.Texture3D:
             return 'TEXTURE3D'
         case _:
-            return str(view_type)
+            return "???"
 
 def view_type_has_mip_range(view_type, uav):
     return (not uav) and view_type != rd.TextureType.Texture2DMS and view_type != rd.TextureType.Texture2DMSArray
@@ -97,6 +97,84 @@ def view_type_has_array_range(view_type, uav):
             return True
         case _:
             return False
+
+def convert_address(addr):
+    match addr:
+        case rd.AddressMode.Wrap:
+            return "WRAP";
+        case rd.AddressMode.ClampEdge:
+            return "CLAMP"
+        case rd.AddressMode.Mirror:
+            return "MIRROR"
+        case rd.AddressMode.MirrorOnce | rd.AddressMode.MirrorClamp:
+            return "MIRROR_ONCE"
+        case rd.AddressMode.ClampBorder:
+            return "BORDER"
+        case _:
+            return "???"
+
+def convert_comparison_func(func):
+    match func:
+        case rd.CompareFunction.AlwaysTrue:
+            return "ALWAYS"
+        case rd.CompareFunction.Never:
+            return "NEVER"
+        case rd.CompareFunction.Less:
+            return "LESS"
+        case rd.CompareFunction.LessEqual:
+            return "LESS_EQUAL"
+        case rd.CompareFunction.Greater:
+            return "GREATER"
+        case rd.CompareFunction.GreaterEqual:
+            return "GREATER_EQUAL"
+        case rd.CompareFunction.Equal:
+            return "EQUAL"
+        case rd.CompareFunction.NotEqual:
+            return "NOT_EQUAL"
+        case _:
+            return "???"
+
+def convert_filter(filt):
+    if filt.minify == rd.FilterMode.Anisotropic or filt.magnify == rd.FilterMode.Anisotropic:
+        match filt.filter:
+            case rd.FilterFunction.Normal:
+                return 'ANISOTROPIC'
+            case rd.FilterFunction.Comparison:
+                return 'COMPARISON_ANISOTROPIC'
+            case rd.FilterFunction.Minimum:
+                return 'MINIMUM_ANISOTROPIC'
+            case rd.FilterFunction.Maximum:
+                return 'MAXIMUM_ANISOTROPIC'
+            case _:
+                return '???'
+
+    order = [
+        filt.minify == rd.FilterMode.Point,
+        filt.magnify == rd.FilterMode.Point,
+        filt.mip == rd.FilterMode.Point
+    ]
+
+    kinds = [ 'MIN', 'MAG', 'MIP' ]
+    res = ''
+
+    for i in range(3):
+        emit_kind = order[i + 1] != order[i] if i < 2 else True
+        res += kinds[i]
+        if emit_kind:
+            res += '_'
+            res += 'POINT' if order[i] else 'LINEAR'
+        if i < 2:
+            res += '_'
+
+    match filt.filter:
+        case rd.FilterFunction.Comparison:
+            res = 'COMPARISON_' + res
+        case rd.FilterFunction.Minimum:
+            res = 'MINIMUM_' + res
+        case rd.FilterFunction.Maximum:
+            res = 'MAXIMUM_' + res
+
+    return res
 
 def view_type_has_cube_range(view_type, uav):
     return view_type == rd.TextureType.TextureCubeArray
@@ -150,22 +228,22 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     generic_pso : renderdoc.PipeState = ctx.CurPipelineState()
     reflection : rd.ShaderReflection = generic_pso.GetShaderReflection(rd.ShaderStage.Compute)
-    print(reflection)
 
-    print('Grabbing push constants')
     push = pso.pushconsts
     print(push)
 
     ro : List[rd.UsedDescriptor] = generic_pso.GetReadOnlyResources(rd.ShaderStage.Compute)
     rw : List[rd.UsedDescriptor] = generic_pso.GetReadWriteResources(rd.ShaderStage.Compute)
+    cbv : List[rd.UsedDescriptor] = generic_pso.GetConstantBlocks(rd.ShaderStage.Compute)
+    samplers : List[rd.UsedDescriptor] = generic_pso.GetSamplers(rd.ShaderStage.Compute)
 
     unique_texture_resources = {}
     unique_buffer_resources = {}
 
     for kind in [ro, rw]:
         for r in kind:
-            print('shaderName: {}'.format(reflection.readWriteResources[r.access.index].name))
-            print('ArrayElement:', r.access.arrayElement)
+            #print('shaderName: {}'.format(reflection.readWriteResources[r.access.index].name))
+            #print('ArrayElement:', r.access.arrayElement)
 
             if is_buffer(r.descriptor.type):
                 if r.descriptor.resource not in unique_buffer_resources:
@@ -185,9 +263,9 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 tex = unique_texture_resources[r.descriptor.resource]
                 tex.add_view_format(r.descriptor.format)
                 if is_uav(r.descriptor.type):
-                    tex.srv = True
-                else:
                     tex.uav = True
+                else:
+                    tex.srv = True
 
     blob_index = 1
     dir_path = '/tmp'
@@ -262,6 +340,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 'Width' : img.desc.width,
                 'Height' : img.desc.height,
                 'Format' : img.base_format.Name(),
+                'MipLevels' : img.desc.mips,
                 'DepthOrArraySize' : max(img.desc.depth, img.desc.arraysize),
                 'FlagUAV' : uav,
                 'PixelSize' : img.base_format.ElementSize(),
@@ -269,11 +348,76 @@ def export_callback(ctx : qrd.CaptureContext, data):
             }
             resources.append(res)
 
-    capture['Resources'] = resources
-
     srvs = []
     uavs = []
+    cbvs = []
+    desc_samplers = []
     used_resource_heap_offsets = set()
+    used_sampler_heap_offsets = set()
+
+    for r in samplers:
+        print('Sampler ...')
+        block = reflection.samplers[r.access.index]
+        samp = r.sampler
+        # Skip immutable samplers
+        if block.bindArraySize == 1 or samp.creationTimeConstant:
+            continue
+        if r.access.arrayElement in used_sampler_heap_offsets:
+            continue
+        print('Emitting Sampler ...')
+        used_sampler_heap_offsets.add(r.access.arrayElement)
+        desc = {
+            'HeapOffset' : r.access.arrayElement,
+            'AddressU' : convert_address(samp.addressU),
+            'AddressV' : convert_address(samp.addressV),
+            'AddressW' : convert_address(samp.addressW),
+            'ComparisonFunc' : convert_comparison_func(samp.compareFunction),
+            'MaxAnisotropy' : samp.maxAnisotropy,
+            'MinLOD' : samp.minLOD,
+            'MaxLOD' : samp.maxLOD,
+            'MipLODBias' : samp.mipBias,
+            'Filter' : convert_filter(samp.filter)
+        }
+
+        if samp.UseBorder():
+            desc['BorderColor'] = [ x for x in samp.borderColorValue.float ]
+        desc_samplers.append(desc)
+
+    for r in cbv:
+        block = reflection.constantBlocks[r.access.index]
+        if block.compileConstants or (not block.bufferBacked):
+            continue
+        if block.bindArraySize == 1:
+            print('PushDescriptor path not supported yet.')
+            continue
+        if r.access.arrayElement in used_resource_heap_offsets:
+            continue
+        used_resource_heap_offsets.add(r.access.arrayElement)
+
+        print('shaderName: {}'.format(block.name))
+        name = f'cbv{blob_index}'
+        path = name + '.bin'
+        blob_index += 1
+        ctx.Replay().BlockInvoke(lambda replayer :
+                                 dump_binary_to_file(os.path.join(dir_path, path),
+                                                     replayer.GetBufferData(r.descriptor.resource,
+                                                                            r.descriptor.byteOffset,
+                                                                            r.descriptor.byteSize)))
+        res = {
+            'name' : path,
+            'Dimension' : 'BUFFER',
+            'Width' : r.descriptor.byteSize,
+            'data' : [ path ]
+        }
+        resources.append(res)
+
+        cbv = {
+            'HeapOffset' : r.access.arrayElement,
+            'Resource' : name,
+            'BufferLocation' : 0,
+            'SizeInBytes' : r.descriptor.byteSize
+        }
+        cbvs.append(cbv)
 
     for kind in [ro, rw]:
         for r in kind:
@@ -334,8 +478,11 @@ def export_callback(ctx : qrd.CaptureContext, data):
             else:
                 srvs.append(desc)
 
+    capture['Resources'] = resources
     capture['SRV'] = srvs
     capture['UAV'] = uavs
+    capture['CBV'] = cbvs
+    capture['Sampler'] = desc_samplers
 
     with open(os.path.join(dir_path, 'capture.json'), 'w') as f:
         print(json.dumps(capture, indent = 4), file = f)
@@ -347,7 +494,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
 def register(version : str, ctx : qrd.CaptureContext):
     print('Loading exporter for version {}'.format(version))
-    ctx.Extensions().RegisterWindowMenu(qrd.WindowMenu.Window, ["Export D3D12 Replayer Capture"], export_callback)
+    ctx.Extensions().RegisterWindowMenu(qrd.WindowMenu.Window, ["Export vkd3d-proton to D3D12 Replayer Capture"], export_callback)
 
 def unregister():
     print('Unregistering exporter')
