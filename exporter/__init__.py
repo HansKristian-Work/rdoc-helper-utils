@@ -3,6 +3,71 @@ import qrenderdoc as qrd
 import renderdoc as rd
 import os
 import json
+import sys
+import array
+
+def extract_string(tokenstr):
+    s = ''
+    for c in tokenstr:
+        for i in range(4):
+            shifted = (c >> (8 * i)) & 0xff
+            if shifted == 0:
+                break
+            s += chr(shifted)
+    return s
+
+class spv:
+    OpTypeInt = 21
+    OpExtInstImport = 11
+    OpExtInst = 12
+    OpString = 7
+    OpConstant = 43
+
+def parse_spirv_resources(bytes):
+    token_array = [x for x in array.array('I', bytes)]
+    token_array = token_array[5:]
+
+    constants = dict()
+    strings = dict()
+    int_types = set()
+    nonsemantic = 0
+
+    resources = []
+    name = 'shader.dxil'
+
+    offset = 0
+    while offset < len(token_array):
+        opcode : int = token_array[offset] & 0xffff
+        oplen = token_array[offset] >> 16
+        args = token_array[offset + 1 : offset + oplen]
+        offset += oplen
+        match opcode:
+            case spv.OpTypeInt:
+                int_types.add(args[0])
+            case spv.OpString:
+                s = extract_string(args[1:])
+                if s.endswith('.dxil') or s.endswith('.dxbc'):
+                    name = s
+                else:
+                    strings[args[0]] = s
+            case spv.OpConstant:
+                if args[0] in int_types:
+                    constants[args[1]] = args[2]
+            case spv.OpExtInstImport:
+                if extract_string(args[1:]) == 'NonSemantic.dxil-spirv.signature':
+                    nonsemantic = args[0]
+            case spv.OpExtInst:
+                if args[2] == nonsemantic and args[3] == 0:
+                    kind = strings[args[4]]
+                    index = constants[args[5]]
+                    pushoffset = constants[args[6]]
+                    pushsize = constants[args[7]]
+                    resources.append((kind, index, pushoffset, pushsize))
+            case _:
+                pass
+
+
+    return resources, name
 
 def is_buffer(desc_type):
     match desc_type:
@@ -216,6 +281,15 @@ def dump_binary_to_file(path, binary_data):
     with open(path, 'wb') as f:
         f.write(binary_data)
 
+def lookup_bda(ctx : qrd.CaptureContext, bda, max_size):
+    buffers : List[rd.BufferDescription] = ctx.GetBuffers()
+    for buf in buffers:
+        if bda >= buf.gpuAddress and bda < buf.gpuAddress + buf.length:
+            avail_len = buf.gpuAddress + buf.length - bda
+            avail_len = min(avail_len, max_size)
+            return buf.resourceId, bda - buf.gpuAddress, avail_len
+    return 0, 0, 0
+
 def export_callback(ctx : qrd.CaptureContext, data):
     print('Trying to export ...')
     eid = ctx.CurEvent()
@@ -229,8 +303,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
     generic_pso : renderdoc.PipeState = ctx.CurPipelineState()
     reflection : rd.ShaderReflection = generic_pso.GetShaderReflection(rd.ShaderStage.Compute)
 
-    push = pso.pushconsts
-    print(push)
+    spirv_resources, dxil_name = parse_spirv_resources(reflection.rawBytes)
+    push = [x for x in array.array('I', pso.pushconsts)]
 
     ro : List[rd.UsedDescriptor] = generic_pso.GetReadOnlyResources(rd.ShaderStage.Compute)
     rw : List[rd.UsedDescriptor] = generic_pso.GetReadWriteResources(rd.ShaderStage.Compute)
@@ -242,9 +316,6 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     for kind in [ro, rw]:
         for r in kind:
-            #print('shaderName: {}'.format(reflection.readWriteResources[r.access.index].name))
-            #print('ArrayElement:', r.access.arrayElement)
-
             if is_buffer(r.descriptor.type):
                 if r.descriptor.resource not in unique_buffer_resources:
                     unique_buffer_resources[r.descriptor.resource] = BufferState(r.descriptor.resource)
@@ -267,10 +338,31 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 else:
                     tex.srv = True
 
+    for res in spirv_resources:
+        # Register root descriptors
+        kind = res[0]
+        index = res[1]
+        pushoffset = res[2] // 4
+        pushsize = res[3] // 4
+        if kind == 'SRV' or kind == 'UAV' or kind == 'CBV':
+            bda = push[pushoffset] | (push[pushoffset + 1] << 32)
+            resid, offset, size = lookup_bda(ctx, bda, 0x10000 if kind == 'CBV' else 0xffffffff)
+            if resid != 0:
+                if resid not in unique_buffer_resources:
+                    unique_buffer_resources[resid] = BufferState(resid)
+                buf = unique_buffer_resources[resid]
+                buf.add_accessed_range(offset, offset + size)
+                if kind == 'UAV':
+                    buf.uav = True
+                else:
+                    buf.srv = True
+            else:
+                print(f'Failed to lookup BDA {hex(bda)}')
+
     blob_index = 1
     dir_path = '/tmp'
 
-    # Dump buffers to file
+    # Dump accessed buffers to file
     for buf in unique_buffer_resources.values():
         buf.align()
         buf.name = f'buffer{blob_index}'
@@ -308,8 +400,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     capture = {}
 
-    capture['CS'] = 'shader.dxil'
-    capture['RootSignature'] = 'rs.dxil'
+    capture['CS'] = dxil_name
+    capture['RootSignature'] = 'rootsig.rs'
     resources = []
     capture['Dispatch'] = [1, 1, 1]
 
@@ -484,13 +576,29 @@ def export_callback(ctx : qrd.CaptureContext, data):
     capture['CBV'] = cbvs
     capture['Sampler'] = desc_samplers
 
+    root_parameters = []
+
+    for res in spirv_resources:
+        kind = res[0]
+        index = res[1]
+        pushoffset = res[2] // 4
+        pushsize = res[3] // 4
+        if kind == 'SRV' or kind == 'UAV' or kind == 'CBV':
+            bda = push[pushoffset] | (push[pushoffset + 1] << 32)
+            resid, offset, _ = lookup_bda(ctx, bda, 0x10000 if kind == 'CBV' else 0xffffffff)
+            if resid != 0:
+                root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : unique_buffer_resources[resid].name, 'offset' : offset })
+            else:
+                print(f'Failed to lookup BDA {hex(bda)}, cannot dump parameter {index}')
+        if kind == 'ResourceTable' or kind == 'SamplerTable':
+            root_parameters.append({ 'index' : index, 'type' : kind, 'offset' : push[pushoffset] })
+        if kind == 'Constant':
+            root_parameters.append({ 'index' : index, 'type' : kind, 'offset' : pushoffset, 'data' : push[pushoffset : pushoffset + pushsize] })
+
+    capture['RootParameters'] = root_parameters
+
     with open(os.path.join(dir_path, 'capture.json'), 'w') as f:
         print(json.dumps(capture, indent = 4), file = f)
-
-    #buffers : List[rd.BufferDescription] = ctx.GetBuffers()
-    #for buf in buffers:
-    #    print('Buffer {} : BDA {}, length {}'.format(buf.resourceId, buf.gpuAddress, buf.length))
-    #    #ctx.Replay().BlockInvoke(lambda replayer : print(replayer.GetBufferData(r.descriptor.resource, r.descriptor.byteOffset, r.descriptor.byteSize)))
 
 def register(version : str, ctx : qrd.CaptureContext):
     print('Loading exporter for version {}'.format(version))
@@ -498,3 +606,10 @@ def register(version : str, ctx : qrd.CaptureContext):
 
 def unregister():
     print('Unregistering exporter')
+
+def main():
+    with open(sys.argv[1], "rb") as f:
+        parse_spirv(f.read())
+
+if __name__ == '__main__':
+    main()
