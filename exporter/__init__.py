@@ -29,11 +29,12 @@ def parse_spirv_resources(bytes):
 
     constants = dict()
     strings = dict()
-    int_types = set()
+    int_types = dict()
     nonsemantic = 0
 
     resources = []
     name = 'shader.dxil'
+    root_signature_binary = b''
 
     offset = 0
     while offset < len(token_array):
@@ -43,7 +44,7 @@ def parse_spirv_resources(bytes):
         offset += oplen
         match opcode:
             case spv.OpTypeInt:
-                int_types.add(args[0])
+                int_types[args[0]] = args[1]
             case spv.OpString:
                 s = extract_string(args[1:])
                 if s.endswith('.dxil') or s.endswith('.dxbc'):
@@ -52,22 +53,28 @@ def parse_spirv_resources(bytes):
                     strings[args[0]] = s
             case spv.OpConstant:
                 if args[0] in int_types:
-                    constants[args[1]] = args[2]
+                    constants[args[1]] = (args[0], args[2])
             case spv.OpExtInstImport:
                 if extract_string(args[1:]) == 'NonSemantic.dxil-spirv.signature':
                     nonsemantic = args[0]
             case spv.OpExtInst:
                 if args[2] == nonsemantic and args[3] == 0:
                     kind = strings[args[4]]
-                    index = constants[args[5]]
-                    pushoffset = constants[args[6]]
-                    pushsize = constants[args[7]]
+                    index = constants[args[5]][1]
+                    pushoffset = constants[args[6]][1]
+                    pushsize = constants[args[7]][1]
                     resources.append((kind, index, pushoffset, pushsize))
-            case _:
-                pass
+                elif args[2] == nonsemantic and args[3] == 1:
+                    if strings[args[4]] == 'RootSignature':
+                        args = args[5:]
+                        for arg in args:
+                            c = constants[arg]
+                            value : int = c[1]
+                            print(value)
+                            bitwidth = int_types[c[0]]
+                            root_signature_binary += value.to_bytes(bitwidth // 8, byteorder = 'little')
 
-
-    return resources, name
+    return resources, name, root_signature_binary
 
 def is_buffer(desc_type):
     match desc_type:
@@ -303,7 +310,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
     generic_pso : renderdoc.PipeState = ctx.CurPipelineState()
     reflection : rd.ShaderReflection = generic_pso.GetShaderReflection(rd.ShaderStage.Compute)
 
-    spirv_resources, dxil_name = parse_spirv_resources(reflection.rawBytes)
+    spirv_resources, dxil_name, root_signature_binary = parse_spirv_resources(reflection.rawBytes)
     push = [x for x in array.array('I', pso.pushconsts)]
 
     ro : List[rd.UsedDescriptor] = generic_pso.GetReadOnlyResources(rd.ShaderStage.Compute)
@@ -399,6 +406,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
                                     f.write(replayer.GetTextureData(img.resource, sub)))
 
     capture = {}
+
+    dump_binary_to_file(os.path.join(dir_path, 'rootsig.rs'), root_signature_binary)
 
     capture['CS'] = dxil_name
     capture['RootSignature'] = 'rootsig.rs'
