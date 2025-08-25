@@ -281,7 +281,8 @@ class TextureState():
         self.desc = None
 
     def add_view_format(self, fmt):
-        self.formats.append(fmt)
+        if fmt not in self.formats:
+            self.formats.append(fmt)
 
 def dump_binary_to_file(path, binary_data):
     with open(path, 'wb') as f:
@@ -328,6 +329,11 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     for kind in [ro, rw]:
         for r in kind:
+            if is_uav(r.descriptor.type):
+                name = reflection.readWriteResources[r.access.index].name
+            else:
+                name = reflection.readOnlyResources[r.access.index].name
+
             if is_buffer(r.descriptor.type):
                 if r.descriptor.resource not in unique_buffer_resources:
                     unique_buffer_resources[r.descriptor.resource] = BufferState(r.descriptor.resource)
@@ -335,20 +341,29 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 # We need more complex reflection to know if a resource is SRV or UAV. For now, assume UAV.
                 buf = unique_buffer_resources[r.descriptor.resource]
                 buf.add_accessed_range(r.descriptor.byteOffset, r.descriptor.byteSize + r.descriptor.byteOffset)
-                if is_uav(r.descriptor.type):
+
+                print(f'Got buffer resource {name}')
+                force_srv = 'SRV' in name
+
+                if is_uav(r.descriptor.type) and (not force_srv):
                     buf.uav = True
+                    print('  Registering UAV access')
                 else:
-                    buf.srv = True 
+                    buf.srv = True
+                    print('  Registering SRV access')
             elif is_image(r.descriptor.type):
                 if r.descriptor.resource not in unique_texture_resources:
                     unique_texture_resources[r.descriptor.resource] = TextureState(r.descriptor.resource)
 
                 tex = unique_texture_resources[r.descriptor.resource]
                 tex.add_view_format(r.descriptor.format)
+                print(f'Got image resource {name}')
                 if is_uav(r.descriptor.type):
                     tex.uav = True
+                    print('  Registering UAV access')
                 else:
                     tex.srv = True
+                    print('  Registering SRV access')
 
     for res in spirv_resources:
         # Register root descriptors
@@ -453,6 +468,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 'DepthOrArraySize' : max(img.desc.depth, img.desc.arraysize),
                 'FlagUAV' : uav,
                 'PixelSize' : img.base_format.ElementSize(),
+                'CastFormats' : [ x.Name() for x in img.formats ],
                 'data': img.paths
             }
             resources.append(res)
@@ -535,7 +551,13 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 continue
             used_resource_heap_offsets.add(r.access.arrayElement)
 
-            uav = is_uav(r.descriptor.type)
+            if is_uav(r.descriptor.type):
+                name = reflection.readWriteResources[r.access.index].name
+            else:
+                name = reflection.readOnlyResources[r.access.index].name
+            force_srv = 'SRV' in name
+
+            uav = is_uav(r.descriptor.type) and (not force_srv)
 
             if is_buffer(r.descriptor.type):
                 buf = unique_buffer_resources[r.descriptor.resource]
@@ -550,11 +572,22 @@ def export_callback(ctx : qrd.CaptureContext, data):
                     desc['FirstElement'] = (r.descriptor.byteOffset - buf.start_offset) // element_size
                     desc['NumElements'] = r.descriptor.byteSize // element_size
                 else:
-                    # TODO: Figure out if we need to emit BAB or structured. Just assume plain uint structured for now.
-                    element_size = 4
-                    desc['FirstElement'] = (r.descriptor.byteOffset - buf.start_offset) // element_size
-                    desc['NumElements'] = r.descriptor.byteSize // element_size
-                    desc['StructureByteStride'] = 4
+                    decoded_name = name.split('_')
+                    if len(decoded_name) >= 3:
+                        element_size = 0
+
+                        if decoded_name[1] == 'StructuredBuffer':
+                            element_size = int(decoded_name[2])
+                            desc['StructureByteStride'] = element_size
+                        elif decoded_name[1] == 'ByteAddressBuffer':
+                            desc['Format'] = 'R32_TYPELESS'
+                            desc['Flags'] = 'RAW'
+                            element_size = 4
+                        else:
+                            print(f'Unrecognized resource type {decoded_name[1]}')
+
+                        desc['FirstElement'] = (r.descriptor.byteOffset - buf.start_offset) // element_size
+                        desc['NumElements'] = r.descriptor.byteSize // element_size
 
             elif is_image(r.descriptor.type):
                 img = unique_texture_resources[r.descriptor.resource]
