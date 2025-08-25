@@ -70,7 +70,6 @@ def parse_spirv_resources(bytes):
                         for arg in args:
                             c = constants[arg]
                             value : int = c[1]
-                            print(value)
                             bitwidth = int_types[c[0]]
                             root_signature_binary += value.to_bytes(bitwidth // 8, byteorder = 'little')
 
@@ -302,6 +301,10 @@ def export_callback(ctx : qrd.CaptureContext, data):
     eid = ctx.CurEvent()
     print('Got EID {}'.format(eid))
 
+    if eid == 0:
+        print('Cannot capture EID 0')
+        return
+
     pso : renderdoc.VKState = ctx.CurVulkanPipelineState()
     if pso is None:
         print('Could not find a Vulkan pipeline state.')
@@ -317,6 +320,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
     rw : List[rd.UsedDescriptor] = generic_pso.GetReadWriteResources(rd.ShaderStage.Compute)
     cbv : List[rd.UsedDescriptor] = generic_pso.GetConstantBlocks(rd.ShaderStage.Compute)
     samplers : List[rd.UsedDescriptor] = generic_pso.GetSamplers(rd.ShaderStage.Compute)
+
+    action_description : rd.ActionDescription = ctx.GetAction(eid)
 
     unique_texture_resources = {}
     unique_buffer_resources = {}
@@ -369,6 +374,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
     blob_index = 1
     dir_path = '/tmp'
 
+    ctx.SetEventID([], eid - 1, eid - 1)
+
     # Dump accessed buffers to file
     for buf in unique_buffer_resources.values():
         buf.align()
@@ -376,7 +383,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
         path = buf.name + '.bin'
         buf.path = path
         blob_index += 1
-        print('Dumping buffer to: {}'.format(path))
+        print(f'Dumping buffer to: {path}')
         ctx.Replay().BlockInvoke(lambda replayer :
                                  dump_binary_to_file(os.path.join(dir_path, path),
                                                      replayer.GetBufferData(buf.resource, buf.start_offset, buf.end_offset - buf.start_offset)))
@@ -387,12 +394,12 @@ def export_callback(ctx : qrd.CaptureContext, data):
         img.name = f'texture{blob_index}'
         blob_index += 1
         for tex in textures:
-            img.base_format = tex.format
             if tex.resourceId == img.resource:
+                img.base_format = tex.format
                 for mip in range(tex.mips):
                     # Dump mips separately. Fuse all slices together.
                     path = f'{img.name}_mip{mip}.bin'
-                    print('Dumping texture to: {}'.format(path))
+                    print(f'Dumping texture to: {path}')
                     img.paths.append(path)
                     img.desc = tex
                     with open(os.path.join(dir_path, path), 'wb') as f:
@@ -412,7 +419,8 @@ def export_callback(ctx : qrd.CaptureContext, data):
     capture['CS'] = dxil_name
     capture['RootSignature'] = 'rootsig.rs'
     resources = []
-    capture['Dispatch'] = [1, 1, 1]
+    dispatch_dim = action_description.dispatchDimension
+    capture['Dispatch'] = [dispatch_dim[0], dispatch_dim[1], dispatch_dim[2]]
 
     for buf in unique_buffer_resources.values():
         for uav in range(2):
@@ -473,7 +481,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
             'AddressV' : convert_address(samp.addressV),
             'AddressW' : convert_address(samp.addressW),
             'ComparisonFunc' : convert_comparison_func(samp.compareFunction),
-            'MaxAnisotropy' : samp.maxAnisotropy,
+            'MaxAnisotropy' : int(samp.maxAnisotropy),
             'MinLOD' : samp.minLOD,
             'MaxLOD' : samp.maxLOD,
             'MipLODBias' : samp.mipBias,
@@ -495,7 +503,6 @@ def export_callback(ctx : qrd.CaptureContext, data):
             continue
         used_resource_heap_offsets.add(r.access.arrayElement)
 
-        print('shaderName: {}'.format(block.name))
         name = f'cbv{blob_index}'
         path = name + '.bin'
         blob_index += 1
@@ -505,7 +512,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                                                                             r.descriptor.byteOffset,
                                                                             r.descriptor.byteSize)))
         res = {
-            'name' : path,
+            'name' : name,
             'Dimension' : 'BUFFER',
             'Width' : r.descriptor.byteSize,
             'data' : [ path ]
@@ -596,21 +603,23 @@ def export_callback(ctx : qrd.CaptureContext, data):
             bda = push[pushoffset] | (push[pushoffset + 1] << 32)
             resid, offset, _ = lookup_bda(ctx, bda, 0x10000 if kind == 'CBV' else 0xffffffff)
             if resid != 0:
-                root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : unique_buffer_resources[resid].name, 'offset' : offset })
+                root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : unique_buffer_resources[resid].name + '.srv', 'offset' : offset })
             else:
                 print(f'Failed to lookup BDA {hex(bda)}, cannot dump parameter {index}')
         if kind == 'ResourceTable' or kind == 'SamplerTable':
             root_parameters.append({ 'index' : index, 'type' : kind, 'offset' : push[pushoffset] })
         if kind == 'Constant':
-            root_parameters.append({ 'index' : index, 'type' : kind, 'offset' : pushoffset, 'data' : push[pushoffset : pushoffset + pushsize] })
+            root_parameters.append({ 'index' : index, 'type' : kind, 'data' : push[pushoffset : pushoffset + pushsize] })
 
     capture['RootParameters'] = root_parameters
 
     with open(os.path.join(dir_path, 'capture.json'), 'w') as f:
         print(json.dumps(capture, indent = 4), file = f)
 
+    ctx.SetEventID([], eid, eid)
+
 def register(version : str, ctx : qrd.CaptureContext):
-    print('Loading exporter for version {}'.format(version))
+    print(f'Loading exporter for version {version}')
     ctx.Extensions().RegisterWindowMenu(qrd.WindowMenu.Window, ["Export vkd3d-proton to D3D12 Replayer Capture"], export_callback)
 
 def unregister():
