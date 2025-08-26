@@ -424,9 +424,9 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 tex = unique_texture_resources[r.descriptor.resource]
                 tex.add_view_format(r.descriptor.format)
                 if is_uav(r.descriptor.type):
-                    tex.uav = True
+                    tex.rw = True
                 else:
-                    tex.srv = True
+                    tex.ro = True
 
     for res in spirv_resources:
         print(res)
@@ -519,9 +519,9 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     for img in unique_texture_resources.values():
         for uav in range(2):
-            if uav == 0 and (not img.srv):
+            if uav == 0 and (not img.ro):
                 continue
-            if uav == 1 and (not img.uav):
+            if uav == 1 and (not img.rw):
                 continue
             res = {
                 'name' : img.name + ('.ro' if uav == 0 else '.rw'),
