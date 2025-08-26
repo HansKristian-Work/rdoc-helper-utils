@@ -344,6 +344,8 @@ def to_d3d12_format(fmt : rd.ResourceFormat, is_depth):
         return 'D32_FLOAT' if is_depth else 'R32_FLOAT'
     elif name.startswith('D16'):
         return 'D16_UNORM' if is_depth else 'R16_UNORM'
+    elif name.endswith('_SRGB'):
+        return name[:-4] + 'UNORM_SRGB'
     else:
         return name
 
@@ -552,6 +554,17 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 continue
             if uav == 1 and (not img.rw):
                 continue
+
+            flags = img.creationFlags
+            cast_formats = [ to_d3d12_format(x, False) for x in img.formats ]
+
+            # Ensure that if we have a UAV + BC texture, we must add at least one format to the cast list which is UAV compatible.
+            if (flags & rd.TextureCategory.ShaderReadWrite) and img.base_format.BlockFormat():
+                if img.base_format.ElementSize() == 16:
+                    cast_formats.append('R32G32B32A32_UINT')
+                elif img.base_format.ElementSize() == 8:
+                    cast_formats.append('R32G32_UINT')
+
             res = {
                 'name' : img.name + ('.ro' if uav == 0 else '.rw'),
                 'Dimension' : f'TEXTURE{img.desc.dimension}D',
@@ -561,11 +574,10 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 'MipLevels' : img.desc.mips,
                 'DepthOrArraySize' : max(img.desc.depth, img.desc.arraysize),
                 'PixelSize' : to_d3d12_pixel_size(img.base_format),
-                'CastFormats' : [ to_d3d12_format(x, False) for x in img.formats ],
+                'CastFormats' : cast_formats,
                 'data': img.paths
             }
 
-            flags = img.creationFlags
             if flags & rd.TextureCategory.ColorTarget:
                 res['FlagRTV'] = 1
             if flags & rd.TextureCategory.DepthTarget:
