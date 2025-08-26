@@ -565,7 +565,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                         cast_formats.append('R32G32B32A32_UINT')
                     elif img.base_format.ElementSize() == 8:
                         cast_formats.append('R32G32_UINT')
-                elif img.base_format.Name().endswith('SRGB'):
+                elif img.base_format.Name().endswith('_SRGB'):
                     # If the base format is SRGB we need the UNORM variant in the cast list.
                     cast_formats.append(img.base_format.Name()[:-5])
 
