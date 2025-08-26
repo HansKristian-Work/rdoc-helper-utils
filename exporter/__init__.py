@@ -250,31 +250,59 @@ def convert_filter(filt):
 def view_type_has_cube_range(view_type, uav):
     return view_type == rd.TextureType.TextureCubeArray
 
-class BufferState():
-    def __init__(self, res):
-        self.start_offset = 0xffffffff
-        self.end_offset = 0
-        self.srv = False
-        self.uav = False
+class BufferRange():
+    def __init__(self, start, end):
+        self.start_offset = start
+        self.end_offset = end
+        self.ro = False
+        self.rw = False
         self.name = ''
         self.path = ''
+
+class BufferState():
+    def __init__(self, res):
+        self.ranges = []
         self.resource = res
 
-    def add_accessed_range(self, start, end):
-        if start < self.start_offset:
-            self.start_offset = start
-        if end > self.end_offset:
-            self.end_offset = end
+    def add_accessed_range(self, start, end, is_uav):
+        existing = self.find_overlapping_range(start, end)
+        if existing:
+            existing.start_offset = min(existing.start_offset, start)
+            existing.end_offset = max(existing.end_offset, end)
+        else:
+            existing = BufferRange(start, end)
+            self.ranges.append(existing)
+
+        if is_uav:
+            existing.rw = True
+        else:
+            existing.ro = True
 
     def align(self):
-        self.start_offset = self.start_offset & ~0xffff
+        # Core buffer alignment is 64 KiB in D3D12 (without the very latest AgilitySDK)
+        # Need this to ensure that alignments for raw buffers work out.
+        for buf_range in self.ranges:
+            buf_range.start_offset = buf_range.start_offset & ~0xffff
+
+    def find_overlapping_range(self, start, end):
+        for buf_range in self.ranges:
+            if start < buf_range.end_offset and end > buf_range.start_offset:
+                return buf_range
+        return None
+
+    def find_matching_range(self, offset, is_uav):
+        for buf_range in self.ranges:
+            if offset >= buf_range.start_offset and offset < buf_range.end_offset:
+                if (is_uav and buf_range.rw) or (not is_uav and buf_range.ro):
+                    return buf_range
+        return None
 
 class TextureState():
     def __init__(self, res):
         self.formats = []
         self.base_format = None
-        self.srv = False
-        self.uav = False
+        self.ro = False
+        self.rw = False
         self.name = ''
         self.paths = []
         self.resource = res
@@ -311,7 +339,12 @@ def export_callback(ctx : qrd.CaptureContext, data):
         print('Could not find a Vulkan pipeline state.')
         return
 
+    if not pso.compute:
+        print('Current PSO is not a Vulkan compute shader.')
+        return
+
     generic_pso : renderdoc.PipeState = ctx.CurPipelineState()
+
     reflection : rd.ShaderReflection = generic_pso.GetShaderReflection(rd.ShaderStage.Compute)
 
     spirv_resources, dxil_name, root_signature_binary = parse_spirv_resources(reflection.rawBytes)
@@ -323,6 +356,14 @@ def export_callback(ctx : qrd.CaptureContext, data):
     samplers : List[rd.UsedDescriptor] = generic_pso.GetSamplers(rd.ShaderStage.Compute)
 
     action_description : rd.ActionDescription = ctx.GetAction(eid)
+
+    if not action_description:
+        print('There is no action description')
+        return
+
+    if not action_description.dispatchDimension:
+        print('Dispatch dimension is not defined')
+        return
 
     unique_texture_resources = {}
     unique_buffer_resources = {}
@@ -338,34 +379,24 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 if r.descriptor.resource not in unique_buffer_resources:
                     unique_buffer_resources[r.descriptor.resource] = BufferState(r.descriptor.resource)
 
-                # We need more complex reflection to know if a resource is SRV or UAV. For now, assume UAV.
-                buf = unique_buffer_resources[r.descriptor.resource]
-                buf.add_accessed_range(r.descriptor.byteOffset, r.descriptor.byteSize + r.descriptor.byteOffset)
-
-                print(f'Got buffer resource {name}')
+                # Turbo-hacky handshake with vkd3d-proton
                 force_srv = 'SRV' in name
-
-                if is_uav(r.descriptor.type) and (not force_srv):
-                    buf.uav = True
-                    print('  Registering UAV access')
-                else:
-                    buf.srv = True
-                    print('  Registering SRV access')
+                uav = is_uav(r.descriptor.type) and (not force_srv)
+                buf = unique_buffer_resources[r.descriptor.resource]
+                buf.add_accessed_range(r.descriptor.byteOffset, r.descriptor.byteSize + r.descriptor.byteOffset, uav)
             elif is_image(r.descriptor.type):
                 if r.descriptor.resource not in unique_texture_resources:
                     unique_texture_resources[r.descriptor.resource] = TextureState(r.descriptor.resource)
 
                 tex = unique_texture_resources[r.descriptor.resource]
                 tex.add_view_format(r.descriptor.format)
-                print(f'Got image resource {name}')
                 if is_uav(r.descriptor.type):
                     tex.uav = True
-                    print('  Registering UAV access')
                 else:
                     tex.srv = True
-                    print('  Registering SRV access')
 
     for res in spirv_resources:
+        print(res)
         # Register root descriptors
         kind = res[0]
         index = res[1]
@@ -374,15 +405,13 @@ def export_callback(ctx : qrd.CaptureContext, data):
         if kind == 'SRV' or kind == 'UAV' or kind == 'CBV':
             bda = push[pushoffset] | (push[pushoffset + 1] << 32)
             resid, offset, size = lookup_bda(ctx, bda, 0x10000 if kind == 'CBV' else 0xffffffff)
+            print(f'Looking up BDA {hex(bda)} -> {resid}, offset {offset}, size {size}')
             if resid != 0:
                 if resid not in unique_buffer_resources:
                     unique_buffer_resources[resid] = BufferState(resid)
                 buf = unique_buffer_resources[resid]
-                buf.add_accessed_range(offset, offset + size)
-                if kind == 'UAV':
-                    buf.uav = True
-                else:
-                    buf.srv = True
+                buf.add_accessed_range(offset, offset + size, kind == 'UAV')
+                print(f'Registering BDA access of type {kind}')
             else:
                 print(f'Failed to lookup BDA {hex(bda)}')
 
@@ -394,14 +423,16 @@ def export_callback(ctx : qrd.CaptureContext, data):
     # Dump accessed buffers to file
     for buf in unique_buffer_resources.values():
         buf.align()
-        buf.name = f'buffer{blob_index}'
-        path = buf.name + '.bin'
-        buf.path = path
-        blob_index += 1
-        print(f'Dumping buffer to: {path}')
-        ctx.Replay().BlockInvoke(lambda replayer :
-                                 dump_binary_to_file(os.path.join(dir_path, path),
-                                                     replayer.GetBufferData(buf.resource, buf.start_offset, buf.end_offset - buf.start_offset)))
+        for buf_range in buf.ranges:
+            # Dump every unique subrange
+            buf_range.name = f'buffer{blob_index}'
+            path = buf_range.name + '.bin'
+            buf_range.path = path
+            blob_index += 1
+            print(f'Dumping buffer to: {path}')
+            ctx.Replay().BlockInvoke(lambda replayer :
+                                    dump_binary_to_file(os.path.join(dir_path, path),
+                                                        replayer.GetBufferData(buf.resource, buf_range.start_offset, buf_range.end_offset - buf_range.start_offset)))
 
     # Dump textures to file
     textures : List[rd.TextureDescription] = ctx.GetTextures()
@@ -438,19 +469,20 @@ def export_callback(ctx : qrd.CaptureContext, data):
     capture['Dispatch'] = [dispatch_dim[0], dispatch_dim[1], dispatch_dim[2]]
 
     for buf in unique_buffer_resources.values():
-        for uav in range(2):
-            if uav == 0 and (not buf.srv):
-                continue
-            if uav == 1 and (not buf.uav):
-                continue
-            res = {
-                'name' : buf.name + ('.srv' if uav == 0 else '.uav'),
-                'Dimension' : 'BUFFER',
-                'Width' : buf.end_offset - buf.start_offset,
-                'FlagUAV' : uav,
-                'data' : [ buf.path ]
-            }
-            resources.append(res)
+        for buf_range in buf.ranges:
+            for uav in range(2):
+                if uav == 0 and (not buf_range.ro):
+                    continue
+                if uav == 1 and (not buf_range.rw):
+                    continue
+                res = {
+                    'name' : buf_range.name + ('.ro' if uav == 0 else '.rw'),
+                    'Dimension' : 'BUFFER',
+                    'Width' : buf_range.end_offset - buf_range.start_offset,
+                    'FlagUAV' : uav,
+                    'data' : [ buf_range.path ]
+                }
+                resources.append(res)
 
     for img in unique_texture_resources.values():
         for uav in range(2):
@@ -459,7 +491,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
             if uav == 1 and (not img.uav):
                 continue
             res = {
-                'name' : img.name + ('.srv' if uav == 0 else '.uav'),
+                'name' : img.name + ('.ro' if uav == 0 else '.rw'),
                 'Dimension' : f'TEXTURE{img.desc.dimension}D',
                 'Width' : img.desc.width,
                 'Height' : img.desc.height,
@@ -508,6 +540,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
             desc['BorderColor'] = [ x for x in samp.borderColorValue.float ]
         desc_samplers.append(desc)
 
+    # Standalone CBVs are always small, so ignore them w.r.t. subrange tracking.
     for r in cbv:
         block = reflection.constantBlocks[r.access.index]
         if block.compileConstants or (not block.bufferBacked):
@@ -555,43 +588,49 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 name = reflection.readWriteResources[r.access.index].name
             else:
                 name = reflection.readOnlyResources[r.access.index].name
-            force_srv = 'SRV' in name
 
+            force_srv = 'SRV' in name
             uav = is_uav(r.descriptor.type) and (not force_srv)
 
             if is_buffer(r.descriptor.type):
                 buf = unique_buffer_resources[r.descriptor.resource]
-                desc['Resource'] = buf.name + ('.uav' if uav else '.srv')
-                desc['ViewDimension'] = 'BUFFER'
+                buf_range : BufferRange = buf.find_matching_range(r.descriptor.byteOffset, uav)
+                if buf_range:
+                    desc['Resource'] = buf_range.name + ('.rw' if uav else '.ro')
+                    desc['ViewDimension'] = 'BUFFER'
 
-                if is_typed(r.descriptor.type):
-                    desc['Format'] = r.descriptor.format.Name()
-                    element_size = r.descriptor.format.ElementSize()
-                    if (r.descriptor.byteOffset - buf.start_offset) % element_size != 0:
-                        print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
-                    desc['FirstElement'] = (r.descriptor.byteOffset - buf.start_offset) // element_size
-                    desc['NumElements'] = r.descriptor.byteSize // element_size
-                else:
-                    decoded_name = name.split('_')
-                    if len(decoded_name) >= 3:
-                        element_size = 0
-
-                        if decoded_name[1] == 'StructuredBuffer':
-                            element_size = int(decoded_name[2])
-                            desc['StructureByteStride'] = element_size
-                        elif decoded_name[1] == 'ByteAddressBuffer':
-                            desc['Format'] = 'R32_TYPELESS'
-                            desc['Flags'] = 'RAW'
-                            element_size = 4
-                        else:
-                            print(f'Unrecognized resource type {decoded_name[1]}')
-
-                        desc['FirstElement'] = (r.descriptor.byteOffset - buf.start_offset) // element_size
+                    if is_typed(r.descriptor.type):
+                        desc['Format'] = r.descriptor.format.Name()
+                        element_size = r.descriptor.format.ElementSize()
+                        if (r.descriptor.byteOffset - buf_range.start_offset) % element_size != 0:
+                            print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
+                        desc['FirstElement'] = (r.descriptor.byteOffset - buf_range.start_offset) // element_size
                         desc['NumElements'] = r.descriptor.byteSize // element_size
+                    else:
+                        decoded_name = name.split('_')
+                        if len(decoded_name) >= 3:
+                            element_size = 0
+
+                            if decoded_name[1] == 'StructuredBuffer':
+                                element_size = int(decoded_name[2])
+                                desc['StructureByteStride'] = element_size
+                            elif decoded_name[1] == 'ByteAddressBuffer':
+                                desc['Format'] = 'R32_TYPELESS'
+                                desc['Flags'] = 'RAW'
+                                element_size = 4
+                            else:
+                                print(f'Unrecognized resource type {decoded_name[1]}')
+
+                            if (r.descriptor.byteOffset - buf_range.start_offset) % element_size != 0:
+                                print('Raw buffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
+                            desc['FirstElement'] = (r.descriptor.byteOffset - buf_range.start_offset) // element_size
+                            desc['NumElements'] = r.descriptor.byteSize // element_size
+                else:
+                    print('Could not find matching range?')
 
             elif is_image(r.descriptor.type):
                 img = unique_texture_resources[r.descriptor.resource]
-                desc['Resource'] = img.name + ('.uav' if uav else '.srv')
+                desc['Resource'] = img.name + ('.rw' if uav else '.ro')
                 desc['ViewDimension'] = to_view_type(r.descriptor.textureType)
 
                 if view_type_has_mip_range(r.descriptor.textureType, uav):
@@ -636,7 +675,13 @@ def export_callback(ctx : qrd.CaptureContext, data):
             bda = push[pushoffset] | (push[pushoffset + 1] << 32)
             resid, offset, _ = lookup_bda(ctx, bda, 0x10000 if kind == 'CBV' else 0xffffffff)
             if resid != 0:
-                root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : unique_buffer_resources[resid].name + '.srv', 'offset' : offset })
+                unique_buf = unique_buffer_resources[resid]
+                uav = kind == 'UAV'
+                buf_range = unique_buf.find_matching_range(offset, uav)
+                if buf_range:
+                    root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : buf_range.name + ('.rw' if uav else '.ro'), 'offset' : offset - buf_range.start_offset })
+                else:
+                    print('Could not find buffer range.')
             else:
                 print(f'Failed to lookup BDA {hex(bda)}, cannot dump parameter {index}')
         if kind == 'ResourceTable' or kind == 'SamplerTable':
