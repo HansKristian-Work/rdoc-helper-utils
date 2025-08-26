@@ -325,6 +325,9 @@ def lookup_bda(ctx : qrd.CaptureContext, bda, max_size):
             return buf.resourceId, bda - buf.gpuAddress, avail_len
     return 0, 0, 0
 
+def write_output_u32(out_object, in_bytes):
+    out_object = array.array('I', in_bytes)
+
 def export_callback(ctx : qrd.CaptureContext, data):
     print('Trying to export ...')
     eid = ctx.CurEvent()
@@ -368,12 +371,31 @@ def export_callback(ctx : qrd.CaptureContext, data):
     unique_texture_resources = {}
     unique_buffer_resources = {}
 
+    # Very ugly special case for offset buffers. We'll have to rewrite texel buffer ranges as needed.
+    # Goes away with descriptor buffer of course.
+    # The offset buffer is always set 1, binding 1 under normal execution.
+    offset_buffer = None
+    for r in rw:
+        res = reflection.readWriteResources[r.access.index]
+        if res.bindArraySize == 1:
+            if r.descriptor.type == rd.DescriptorType.ReadWriteBuffer and res.fixedBindNumber == 1 and res.fixedBindSetOrSpace == 1:
+                print('Found legacy offset buffer, dumping ...')
+                ctx.Replay().BlockInvoke(lambda replayer :
+                    write_output_u32(offset_buffer, replayer.GetBufferData(
+                        r.descriptor.resource, r.descriptor.byteOffset, r.descriptor.byteSize)))
+                break
+
     for kind in [ro, rw]:
         for r in kind:
             if is_uav(r.descriptor.type):
-                name = reflection.readWriteResources[r.access.index].name
+                res = reflection.readWriteResources[r.access.index]
             else:
-                name = reflection.readOnlyResources[r.access.index].name
+                res = reflection.readOnlyResources[r.access.index]
+
+            name = res.name
+
+            if res.bindArraySize == 1:
+                continue
 
             if is_buffer(r.descriptor.type):
                 if r.descriptor.resource not in unique_buffer_resources:
@@ -383,7 +405,18 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 force_srv = 'SRV' in name
                 uav = is_uav(r.descriptor.type) and (not force_srv)
                 buf = unique_buffer_resources[r.descriptor.resource]
-                buf.add_accessed_range(r.descriptor.byteOffset, r.descriptor.byteSize + r.descriptor.byteOffset, uav)
+
+                if is_typed(r.descriptor.type) and offset_buffer:
+                    # Rewrite the offset / size to match the offset buffer values.
+                    # Ignore offset buffer for SSBO since no driver should hit that path anymore.
+                    offset = r.descriptor.byteOffset + r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 2]
+                    size = r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 3]
+                else:
+                    offset = r.descriptor.byteOffset
+                    size = r.descriptor.byteSize
+
+                buf.add_accessed_range(offset, offset + size, uav)
+
             elif is_image(r.descriptor.type):
                 if r.descriptor.resource not in unique_texture_resources:
                     unique_texture_resources[r.descriptor.resource] = TextureState(r.descriptor.resource)
@@ -578,16 +611,21 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     for kind in [ro, rw]:
         for r in kind:
+            if is_uav(r.descriptor.type):
+                res = reflection.readWriteResources[r.access.index]
+            else:
+                res = reflection.readOnlyResources[r.access.index]
+
+            name = res.name
+
+            if res.bindArraySize == 1:
+                continue
+
             desc = { 'HeapOffset' : r.access.arrayElement }
             # Can happen for aliased resources for vectorization purposes, just ignore
             if r.access.arrayElement in used_resource_heap_offsets:
                 continue
             used_resource_heap_offsets.add(r.access.arrayElement)
-
-            if is_uav(r.descriptor.type):
-                name = reflection.readWriteResources[r.access.index].name
-            else:
-                name = reflection.readOnlyResources[r.access.index].name
 
             force_srv = 'SRV' in name
             uav = is_uav(r.descriptor.type) and (not force_srv)
@@ -600,12 +638,21 @@ def export_callback(ctx : qrd.CaptureContext, data):
                     desc['ViewDimension'] = 'BUFFER'
 
                     if is_typed(r.descriptor.type):
+                        if offset_buffer:
+                            # Rewrite the offset / size to match the offset buffer values.
+                            # Ignore offset buffer for SSBO since no driver should hit that path anymore.
+                            offset = r.descriptor.byteOffset + r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 2]
+                            size = r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 3]
+                        else:
+                            offset = r.descriptor.byteOffset
+                            size = r.descriptor.byteSize
+
                         desc['Format'] = r.descriptor.format.Name()
                         element_size = r.descriptor.format.ElementSize()
-                        if (r.descriptor.byteOffset - buf_range.start_offset) % element_size != 0:
+                        if (offset - buf_range.start_offset) % element_size != 0:
                             print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
-                        desc['FirstElement'] = (r.descriptor.byteOffset - buf_range.start_offset) // element_size
-                        desc['NumElements'] = r.descriptor.byteSize // element_size
+                        desc['FirstElement'] = (offset - buf_range.start_offset) // element_size
+                        desc['NumElements'] = size // element_size
                     else:
                         decoded_name = name.split('_')
                         if len(decoded_name) >= 3:
