@@ -328,6 +328,34 @@ def lookup_bda(ctx : qrd.CaptureContext, bda, max_size):
 def write_output_u32(out_object, in_bytes):
     out_object = array.array('I', in_bytes)
 
+def to_d3d12_format(fmt : rd.ResourceFormat, is_depth):
+    match fmt.type:
+        case rd.ResourceFormatType.D16S8:
+            # There is no D16S8 really.
+            return 'R16_TYPELESS' if is_depth else 'R16_UNORM'
+        case rd.ResourceFormatType.D24S8:
+            return 'R24G8_TYPELESS' if is_depth else 'R24_UNORM_X8_TYPELESS'
+        case rd.ResourceFormatType.D32S8:
+            return 'R32G8X24_TYPELESS' if is_depth else 'R32_FLOAT_X8X24_TYPELESS'
+
+    # There is no plain D24 in D3D12 iirc ...
+    name = fmt.Name()
+    if name == 'D32':
+        return 'R32_TYPELESS' if is_depth else 'R32_FLOAT'
+    elif name == 'D16':
+        return 'R16_TYPELESS' if is_depth else 'R16_UNORM'
+    else:
+        return name
+
+def to_d3d12_pixel_size(fmt : rd.ResourceFormat):
+    match fmt.type:
+        case rd.ResourceFormatType.D32S8:
+            return 8
+        case rd.ResourceFormatType.D24S8:
+            return 4
+        case _:
+            return fmt.ElementSize()
+
 def export_callback(ctx : qrd.CaptureContext, data):
     print('Trying to export ...')
     eid = ctx.CurEvent()
@@ -481,6 +509,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                     print(f'Dumping texture to: {path}')
                     img.paths.append(path)
                     img.desc = tex
+                    img.creationFlags = tex.creationFlags
                     with open(os.path.join(dir_path, path), 'wb') as f:
                         for layer in range(max(tex.depth, tex.arraysize)):
                             sub = rd.Subresource()
@@ -528,14 +557,31 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 'Dimension' : f'TEXTURE{img.desc.dimension}D',
                 'Width' : img.desc.width,
                 'Height' : img.desc.height,
-                'Format' : img.base_format.Name(),
+                'Format' : to_d3d12_format(img.base_format, True),
                 'MipLevels' : img.desc.mips,
                 'DepthOrArraySize' : max(img.desc.depth, img.desc.arraysize),
-                'FlagUAV' : uav,
-                'PixelSize' : img.base_format.ElementSize(),
-                'CastFormats' : [ x.Name() for x in img.formats ],
+                'PixelSize' : to_d3d12_pixel_size(img.base_format),
+                'CastFormats' : [ to_d3d12_format(x, False) for x in img.formats ],
                 'data': img.paths
             }
+
+            flags = img.creationFlags
+            if flags & rd.TextureCategory.ColorTarget:
+                res['FlagRTV'] = 1
+            if flags & rd.TextureCategory.DepthTarget:
+                res['FlagDSV'] = 1
+            if flags & rd.TextureCategory.ShaderReadWrite:
+                # This affects performance, so emit it accurately, even for SRVs.
+                res['FlagUAV'] = 1
+
+            # For now, only support reading the depth aspect as an SRV for packed depth-stencil.
+            match img.base_format.type:
+                case rd.ResourceFormatType.D16S8:
+                    res['PixelSlice'] = 2
+                case rd.ResourceFormatType.D24S8:
+                    res['PixelSlice'] = 4
+                case rd.ResourceFormatType.D32S8:
+                    res['PixelSlice'] = 4
             resources.append(res)
 
     srvs = []
@@ -647,7 +693,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                             offset = r.descriptor.byteOffset
                             size = r.descriptor.byteSize
 
-                        desc['Format'] = r.descriptor.format.Name()
+                        desc['Format'] = to_d3d12_format(r.descriptor.format, False)
                         element_size = r.descriptor.format.ElementSize()
                         if (offset - buf_range.start_offset) % element_size != 0:
                             print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
