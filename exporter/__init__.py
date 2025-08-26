@@ -332,18 +332,18 @@ def to_d3d12_format(fmt : rd.ResourceFormat, is_depth):
     match fmt.type:
         case rd.ResourceFormatType.D16S8:
             # There is no D16S8 really.
-            return 'R16_TYPELESS' if is_depth else 'R16_UNORM'
+            return 'D16_UNORM' if is_depth else 'R16_UNORM'
         case rd.ResourceFormatType.D24S8:
-            return 'R24G8_TYPELESS' if is_depth else 'R24_UNORM_X8_TYPELESS'
+            return 'D24_UNORM_S8_UINT' if is_depth else 'R24_UNORM_X8_TYPELESS'
         case rd.ResourceFormatType.D32S8:
-            return 'R32G8X24_TYPELESS' if is_depth else 'R32_FLOAT_X8X24_TYPELESS'
+            return 'D32_FLOAT_S8X24_UINT' if is_depth else 'R32_FLOAT_X8X24_TYPELESS'
 
     # There is no plain D24 in D3D12 iirc ...
     name = fmt.Name()
-    if name == 'D32':
-        return 'R32_TYPELESS' if is_depth else 'R32_FLOAT'
-    elif name == 'D16':
-        return 'R16_TYPELESS' if is_depth else 'R16_UNORM'
+    if name.startswith('D32'):
+        return 'D32_FLOAT' if is_depth else 'R32_FLOAT'
+    elif name.startswith('D16'):
+        return 'D16_UNORM' if is_depth else 'R16_UNORM'
     else:
         return name
 
@@ -592,7 +592,6 @@ def export_callback(ctx : qrd.CaptureContext, data):
     used_sampler_heap_offsets = set()
 
     for r in samplers:
-        print('Sampler ...')
         block = reflection.samplers[r.access.index]
         samp = r.sampler
         # Skip immutable samplers
@@ -600,7 +599,6 @@ def export_callback(ctx : qrd.CaptureContext, data):
             continue
         if r.access.arrayElement in used_sampler_heap_offsets:
             continue
-        print('Emitting Sampler ...')
         used_sampler_heap_offsets.add(r.access.arrayElement)
         desc = {
             'HeapOffset' : r.access.arrayElement,
