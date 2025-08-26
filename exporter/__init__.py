@@ -559,11 +559,15 @@ def export_callback(ctx : qrd.CaptureContext, data):
             cast_formats = [ to_d3d12_format(x, False) for x in img.formats ]
 
             # Ensure that if we have a UAV + BC texture, we must add at least one format to the cast list which is UAV compatible.
-            if (flags & rd.TextureCategory.ShaderReadWrite) and img.base_format.BlockFormat():
-                if img.base_format.ElementSize() == 16:
-                    cast_formats.append('R32G32B32A32_UINT')
-                elif img.base_format.ElementSize() == 8:
-                    cast_formats.append('R32G32_UINT')
+            if (flags & rd.TextureCategory.ShaderReadWrite):
+                if img.base_format.BlockFormat():
+                    if img.base_format.ElementSize() == 16:
+                        cast_formats.append('R32G32B32A32_UINT')
+                    elif img.base_format.ElementSize() == 8:
+                        cast_formats.append('R32G32_UINT')
+                elif img.base_format.Name().endswith('SRGB'):
+                    # If the base format is SRGB we need the UNORM variant in the cast list.
+                    cast_formats.append(img.base_format.Name()[:-5])
 
             res = {
                 'name' : img.name + ('.ro' if uav == 0 else '.rw'),
