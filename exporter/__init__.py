@@ -1,3 +1,8 @@
+'''
+D3D12 vkd3d-proton exporter - Copyright 2025 Hans-Kristian Arntzen for Valve Corporation
+SPDX-Licence-Identifier: MIT
+'''
+
 from typing import Optional
 import qrenderdoc as qrd
 import renderdoc as rd
@@ -810,9 +815,3 @@ def register(version : str, ctx : qrd.CaptureContext):
 def unregister():
     print('Unregistering exporter')
 
-def main():
-    with open(sys.argv[1], "rb") as f:
-        parse_spirv(f.read())
-
-if __name__ == '__main__':
-    main()
