@@ -485,6 +485,19 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 print(f'Registering BDA access of type {kind}')
             else:
                 print(f'Failed to lookup BDA {hex(bda)}')
+        elif kind == 'PushCBV':
+            push_set = res[2]
+            push_desc = res[3]
+            for c in cbv:
+                block = reflection.constantBlocks[c.access.index]
+                if block.fixedBindSetOrSpace == push_set and block.fixedBindNumber == push_desc:
+                    resid = c.descriptor.resource
+                    if resid not in unique_buffer_resources:
+                        unique_buffer_resources[resid] = BufferState(resid)
+                    buf = unique_buffer_resources[resid]
+                    buf.add_accessed_range(c.descriptor.byteOffset, c.descriptor.byteOffset + min(0x10000, c.descriptor.byteSize), False)
+                    print(f'Registering Push CBV access.')
+                    break
 
     blob_index = 1
     dir_path = ctx.Extensions().OpenDirectoryName('Export to directory')
@@ -493,6 +506,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
         ctx.Extensions().ErrorDialog('No directory selected, skipping export', 'Export Error')
         return
 
+    # We need to dump resource state as it is observed *before* this EID.
     ctx.SetEventID([], eid - 1, eid - 1)
 
     # Dump accessed buffers to file
@@ -651,7 +665,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
         if block.compileConstants or (not block.bufferBacked):
             continue
         if block.bindArraySize == 1:
-            print('PushDescriptor path not supported yet.')
+            # Handle push descriptors later
             continue
         if r.access.arrayElement in used_resource_heap_offsets:
             continue
@@ -673,13 +687,13 @@ def export_callback(ctx : qrd.CaptureContext, data):
         }
         resources.append(res)
 
-        cbv = {
+        cbv_desc = {
             'HeapOffset' : r.access.arrayElement,
             'Resource' : name,
             'BufferLocation' : 0,
             'SizeInBytes' : r.descriptor.byteSize
         }
-        cbvs.append(cbv)
+        cbvs.append(cbv_desc)
 
     for kind in [ro, rw]:
         for r in kind:
@@ -777,12 +791,6 @@ def export_callback(ctx : qrd.CaptureContext, data):
             else:
                 srvs.append(desc)
 
-    capture['Resources'] = resources
-    capture['SRV'] = srvs
-    capture['UAV'] = uavs
-    capture['CBV'] = cbvs
-    capture['Sampler'] = desc_samplers
-
     root_parameters = []
 
     for res in spirv_resources:
@@ -800,14 +808,35 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 if buf_range:
                     root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : buf_range.name + ('.rw' if uav else '.ro'), 'offset' : offset - buf_range.start_offset })
                 else:
-                    print('Could not find buffer range.')
+                    ctx.Extensions().ErrorDialog('Could not find buffer range for resource. Probably a bug in the script.')
+                    return
             else:
                 print(f'Failed to lookup BDA {hex(bda)}, cannot dump parameter {index}')
-        if kind == 'ResourceTable' or kind == 'SamplerTable':
+        elif kind == 'ResourceTable' or kind == 'SamplerTable':
             root_parameters.append({ 'index' : index, 'type' : kind, 'offset' : push[pushoffset] })
-        if kind == 'Constant':
+        elif kind == 'Constant':
             root_parameters.append({ 'index' : index, 'type' : kind, 'data' : push[pushoffset : pushoffset + pushsize] })
+        elif kind == 'PushCBV':
+            # Dump push descriptors
+            push_set = res[2]
+            push_desc = res[3]
+            for c in cbv:
+                block = reflection.constantBlocks[c.access.index]
+                if block.fixedBindSetOrSpace == push_set and block.fixedBindNumber == push_desc:
+                    unique_buf = unique_buffer_resources[c.descriptor.resource]
+                    buf_range = unique_buf.find_matching_range(offset, False)
+                    if buf_range:
+                        root_parameters.append({ 'index' : index, 'type' : 'CBV', 'Resource' : buf_range.name + '.ro', 'offset' : c.descriptor.byteOffset - buf_range.start_offset })
+                    else:
+                        ctx.Extensions().ErrorDialog('Could not find buffer range for resource. Probably a bug in the script.')
+                        return
+                    break
 
+    capture['Resources'] = resources
+    capture['SRV'] = srvs
+    capture['UAV'] = uavs
+    capture['CBV'] = cbvs
+    capture['Sampler'] = desc_samplers
     capture['RootParameters'] = root_parameters
 
     with open(os.path.join(dir_path, 'capture.json'), 'w') as f:
