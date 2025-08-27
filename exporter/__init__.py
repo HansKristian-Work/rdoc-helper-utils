@@ -525,7 +525,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                     img.desc = tex
                     img.creationFlags = tex.creationFlags
                     with open(os.path.join(dir_path, path), 'wb') as f:
-                        for layer in range(max(tex.depth, tex.arraysize)):
+                        for layer in range(tex.arraysize):
                             sub = rd.Subresource()
                             sub.mip = mip
                             sub.slice = layer
