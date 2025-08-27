@@ -10,6 +10,7 @@ import os
 import json
 import sys
 import array
+import shutil
 
 def extract_string(tokenstr):
     s = ''
@@ -369,24 +370,26 @@ def export_callback(ctx : qrd.CaptureContext, data):
     print('Got EID {}'.format(eid))
 
     if eid == 0:
-        print('Cannot capture EID 0')
+        ctx.Extensions().ErrorDialog('Cannot capture EID 0', 'Export Error')
         return
 
     pso : renderdoc.VKState = ctx.CurVulkanPipelineState()
     if pso is None:
-        print('Could not find a Vulkan pipeline state.')
+        ctx.Extensions().ErrorDialog('Could not find Vulkan PSO state', 'Export Error')
         return
 
     if not pso.compute:
-        print('Current PSO is not a Vulkan compute shader.')
+        ctx.Extensions().ErrorDialog('Could not find Vulkan compute state', 'Export Error')
         return
 
     generic_pso : renderdoc.PipeState = ctx.CurPipelineState()
-
     reflection : rd.ShaderReflection = generic_pso.GetShaderReflection(rd.ShaderStage.Compute)
-
     spirv_resources, dxil_name, root_signature_binary = parse_spirv_resources(reflection.rawBytes)
     push = [x for x in array.array('I', pso.pushconsts)]
+
+    if len(spirv_resources) == 0:
+        ctx.Extensions().ErrorDialog('Could not find NonSemantic info for dxil-spirv in .spv. Outdated vkd3d-proton?', 'Export Error')
+        return
 
     ro : List[rd.UsedDescriptor] = generic_pso.GetReadOnlyResources(rd.ShaderStage.Compute)
     rw : List[rd.UsedDescriptor] = generic_pso.GetReadWriteResources(rd.ShaderStage.Compute)
@@ -396,11 +399,11 @@ def export_callback(ctx : qrd.CaptureContext, data):
     action_description : rd.ActionDescription = ctx.GetAction(eid)
 
     if not action_description:
-        print('There is no action description')
+        ctx.Extensions().ErrorDialog('There is no action description', 'Export Error')
         return
 
-    if not action_description.dispatchDimension:
-        print('Dispatch dimension is not defined')
+    if (not action_description.dispatchDimension) or len(action_description.dispatchDimension) != 3:
+        ctx.Extensions().ErrorDialog('Dispatch dimension is not valid', 'Export Error')
         return
 
     unique_texture_resources = {}
@@ -484,7 +487,11 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 print(f'Failed to lookup BDA {hex(bda)}')
 
     blob_index = 1
-    dir_path = '/tmp'
+    dir_path = ctx.Extensions().OpenDirectoryName('Export to directory')
+
+    if len(dir_path) == 0:
+        ctx.Extensions().ErrorDialog('No directory selected, skipping export', 'Export Error')
+        return
 
     ctx.SetEventID([], eid - 1, eid - 1)
 
@@ -807,6 +814,44 @@ def export_callback(ctx : qrd.CaptureContext, data):
         print(json.dumps(capture, indent = 4), file = f)
 
     ctx.SetEventID([], eid, eid)
+
+    effective_dxil_path = os.path.join(dir_path, dxil_name)
+    need_copy_dialog = False
+    try:
+        stat_result = os.stat(effective_dxil_path)
+        # For some reason, os.stat.S_ISREG doesn't work properly, so just assuming it works.
+    except:
+        need_copy_dialog = True
+        print(f'{effective_dxil_path} does not exist.')
+
+    if need_copy_dialog:
+        dialog_result = ctx.Extensions().QuestionDialog(
+            f'Exported capture successfully. {dxil_name} is not in the output directory. Will you search for it now? The file can be copied manually later.',
+            [qrd.DialogButton.OK, qrd.DialogButton.Cancel],
+            'Success :3')
+        if dialog_result == qrd.DialogButton.OK:
+            search_dir = ctx.Extensions().OpenDirectoryName(f'Search directory for {dxil_name}', 'Search ...')
+            found_file = False
+            for root, dirs, files in os.walk(search_dir):
+                for file in files:
+                    if file == dxil_name:
+                        input_dxil_path = os.path.join(root, file)
+                        try:
+                            if input_dxil_path != effective_dxil_path:
+                                shutil.copy(input_dxil_path, effective_dxil_path)
+                            ctx.Extensions().MessageDialog(f'Found {dxil_name}')
+                            found_file = True
+                            break
+                        except:
+                            ctx.Extensions().ErrorDialog('Failed to copy file ...')
+                if found_file:
+                    break
+
+            if not found_file:
+                ctx.Extensions().ErrorDialog(f'Could not find {dxil_name} in the tree structure of {search_dir}. Capture is incomplete without this file.')
+
+    else:
+        ctx.Extensions().MessageDialog(f'Exported capture successfully.', 'Success :3')
 
 def register(version : str, ctx : qrd.CaptureContext):
     print(f'Loading exporter for version {version}')
