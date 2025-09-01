@@ -684,20 +684,18 @@ def export_callback(ctx : qrd.CaptureContext, data):
                                                         replayer.GetBufferData(r.descriptor.resource,
                                                                                 r.descriptor.byteOffset,
                                                                                 r.descriptor.byteSize)))
-        else:
-            name = 'NULL'
 
-        res = {
-            'name' : name,
-            'Dimension' : 'BUFFER',
-            'Width' : r.descriptor.byteSize,
-            'data' : [ path ]
-        }
-        resources.append(res)
+            res = {
+                'name' : name,
+                'Dimension' : 'BUFFER',
+                'Width' : r.descriptor.byteSize,
+                'data' : [ path ]
+            }
+            resources.append(res)
 
         cbv_desc = {
             'HeapOffset' : r.access.arrayElement,
-            'Resource' : name,
+            'Resource' : 'NULL' if r.descriptor.resource == 0 else name,
             'BufferLocation' : 0,
             'SizeInBytes' : r.descriptor.byteSize
         }
