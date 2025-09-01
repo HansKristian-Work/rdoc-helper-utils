@@ -425,6 +425,9 @@ def export_callback(ctx : qrd.CaptureContext, data):
 
     for kind in [ro, rw]:
         for r in kind:
+            if r.descriptor.resource == 0:
+                continue
+
             if is_uav(r.descriptor.type):
                 res = reflection.readWriteResources[r.access.index]
             else:
@@ -674,11 +677,16 @@ def export_callback(ctx : qrd.CaptureContext, data):
         name = f'cbv{blob_index}'
         path = name + '.bin'
         blob_index += 1
-        ctx.Replay().BlockInvoke(lambda replayer :
-                                 dump_binary_to_file(os.path.join(dir_path, path),
-                                                     replayer.GetBufferData(r.descriptor.resource,
-                                                                            r.descriptor.byteOffset,
-                                                                            r.descriptor.byteSize)))
+
+        if r.descriptor.resource:
+            ctx.Replay().BlockInvoke(lambda replayer :
+                                    dump_binary_to_file(os.path.join(dir_path, path),
+                                                        replayer.GetBufferData(r.descriptor.resource,
+                                                                                r.descriptor.byteOffset,
+                                                                                r.descriptor.byteSize)))
+        else:
+            name = 'NULL'
+
         res = {
             'name' : name,
             'Dimension' : 'BUFFER',
@@ -717,74 +725,85 @@ def export_callback(ctx : qrd.CaptureContext, data):
             uav = is_uav(r.descriptor.type) and (not force_srv)
 
             if is_buffer(r.descriptor.type):
-                buf = unique_buffer_resources[r.descriptor.resource]
-                buf_range : BufferRange = buf.find_matching_range(r.descriptor.byteOffset, uav)
-                if buf_range:
-                    desc['Resource'] = buf_range.name + ('.rw' if uav else '.ro')
-                    desc['ViewDimension'] = 'BUFFER'
+                buf = None if r.descriptor.resource == 0 else unique_buffer_resources[r.descriptor.resource]
+                if buf:
+                    buf_range : BufferRange = buf.find_matching_range(r.descriptor.byteOffset, uav)
+                    if buf_range:
+                        desc['Resource'] = buf_range.name + ('.rw' if uav else '.ro')
+                        desc['ViewDimension'] = 'BUFFER'
 
-                    if is_typed(r.descriptor.type):
-                        if offset_buffer:
-                            # Rewrite the offset / size to match the offset buffer values.
-                            # Ignore offset buffer for SSBO since no driver should hit that path anymore.
-                            offset = r.descriptor.byteOffset + r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 2]
-                            size = r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 3]
-                        else:
-                            offset = r.descriptor.byteOffset
-                            size = r.descriptor.byteSize
-
-                        desc['Format'] = to_d3d12_format(r.descriptor.format, False)
-                        element_size = r.descriptor.format.ElementSize()
-                        if (offset - buf_range.start_offset) % element_size != 0:
-                            print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
-                        desc['FirstElement'] = (offset - buf_range.start_offset) // element_size
-                        desc['NumElements'] = size // element_size
-                    else:
-                        decoded_name = name.split('_')
-                        if len(decoded_name) >= 3:
-                            element_size = 0
-
-                            if decoded_name[1] == 'StructuredBuffer':
-                                element_size = int(decoded_name[2])
-                                desc['StructureByteStride'] = element_size
-                            elif decoded_name[1] == 'ByteAddressBuffer':
-                                desc['Format'] = 'R32_TYPELESS'
-                                desc['Flags'] = 'RAW'
-                                element_size = 4
+                        if is_typed(r.descriptor.type):
+                            if offset_buffer:
+                                # Rewrite the offset / size to match the offset buffer values.
+                                # Ignore offset buffer for SSBO since no driver should hit that path anymore.
+                                offset = r.descriptor.byteOffset + r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 2]
+                                size = r.descriptor.format.ElementSize() * offset_buffer[4 * r.access.arrayElement + 3]
                             else:
-                                print(f'Unrecognized resource type {decoded_name[1]}')
+                                offset = r.descriptor.byteOffset
+                                size = r.descriptor.byteSize
 
-                            if (r.descriptor.byteOffset - buf_range.start_offset) % element_size != 0:
-                                print('Raw buffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
-                            desc['FirstElement'] = (r.descriptor.byteOffset - buf_range.start_offset) // element_size
-                            desc['NumElements'] = r.descriptor.byteSize // element_size
+                            desc['Format'] = to_d3d12_format(r.descriptor.format, False)
+                            element_size = r.descriptor.format.ElementSize()
+                            if (offset - buf_range.start_offset) % element_size != 0:
+                                print('TexelBuffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
+                            desc['FirstElement'] = (offset - buf_range.start_offset) // element_size
+                            desc['NumElements'] = size // element_size
+                        else:
+                            decoded_name = name.split('_')
+                            if len(decoded_name) >= 3:
+                                element_size = 0
+
+                                if decoded_name[1] == 'StructuredBuffer':
+                                    element_size = int(decoded_name[2])
+                                    desc['StructureByteStride'] = element_size
+                                elif decoded_name[1] == 'ByteAddressBuffer':
+                                    desc['Format'] = 'R32_TYPELESS'
+                                    desc['Flags'] = 'RAW'
+                                    element_size = 4
+                                else:
+                                    print(f'Unrecognized resource type {decoded_name[1]}')
+
+                                if (r.descriptor.byteOffset - buf_range.start_offset) % element_size != 0:
+                                    print('Raw buffer does not align properly to buffer start. Is game using non 64 KiB alignment?')
+                                desc['FirstElement'] = (r.descriptor.byteOffset - buf_range.start_offset) // element_size
+                                desc['NumElements'] = r.descriptor.byteSize // element_size
+                    else:
+                        print('Could not find matching range?')
                 else:
-                    print('Could not find matching range?')
+                    desc['Resource'] = 'NULL'
+                    desc['ViewDimension'] = 'BUFFER'
+                    desc['Format'] = 'R32_UINT'
+                    if not is_typed(r.descriptor.type):
+                        desc['Flags'] = 'RAW'
+                        desc['Format'] = 'R32_TYPELESS'
 
             elif is_image(r.descriptor.type):
-                img = unique_texture_resources[r.descriptor.resource]
-                desc['Resource'] = img.name + ('.rw' if uav else '.ro')
+                img = None if r.descriptor.resource == 0 else unique_texture_resources[r.descriptor.resource]
+                desc['Resource'] = (img.name + ('.rw' if uav else '.ro')) if img else 'NULL'
                 desc['ViewDimension'] = to_view_type(r.descriptor.textureType)
+                if img:
+                    if view_type_has_mip_range(r.descriptor.textureType, uav):
+                        desc['MostDetailedMip'] = r.descriptor.firstMip
+                        desc['MipLevels'] = r.descriptor.numMips
+                        desc['ResourceMinLODClamp'] = r.descriptor.minLODClamp
 
-                if view_type_has_mip_range(r.descriptor.textureType, uav):
-                    desc['MostDetailedMip'] = r.descriptor.firstMip
-                    desc['MipLevels'] = r.descriptor.numMips
-                    desc['ResourceMinLODClamp'] = r.descriptor.minLODClamp
+                    if view_type_has_mip_slice(r.descriptor.textureType, uav):
+                        desc['MipSlice'] = r.descriptor.firstMip
 
-                if view_type_has_mip_slice(r.descriptor.textureType, uav):
-                    desc['MipSlice'] = r.descriptor.firstMip
+                    if view_type_has_array_range(r.descriptor.textureType, uav):
+                        desc['FirstArraySlice'] = r.descriptor.firstSlice
+                        desc['ArraySize'] = r.descriptor.numSlices
 
-                if view_type_has_array_range(r.descriptor.textureType, uav):
-                    desc['FirstArraySlice'] = r.descriptor.firstSlice
-                    desc['ArraySize'] = r.descriptor.numSlices
+                    if view_type_has_cube_range(r.descriptor.textureType, uav):
+                        desc['First2DArrayFace'] = 0
+                        desc['NumCubes'] = 0
 
-                if view_type_has_cube_range(r.descriptor.textureType, uav):
-                    desc['First2DArrayFace'] = 0
-                    desc['NumCubes'] = 0
-
-                if view_type_has_wsize(r.descriptor.textureType, uav):
-                    desc['FirstWSlice'] = r.descriptor.firstSlice
-                    desc['WSize'] = r.descriptor.numSlices
+                    if view_type_has_wsize(r.descriptor.textureType, uav):
+                        desc['FirstWSlice'] = r.descriptor.firstSlice
+                        desc['WSize'] = r.descriptor.numSlices
+            else:
+                print(f'Skipping unknown resource.')
+                continue
 
             if uav:
                 uavs.append(desc)
