@@ -620,13 +620,22 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 res['FlagUAV'] = 1
 
             # For now, only support reading the depth aspect as an SRV for packed depth-stencil.
+            # D3D12 does not support castable on planar formats, just revert back to older behavior.
             match img.base_format.type:
                 case rd.ResourceFormatType.D16S8:
                     res['PixelSlice'] = 2
+                    res['CastFormats'] = []
+                    # This isn't really a D3D format.
+                    res['Format'] = 'R16_TYPELESS'
                 case rd.ResourceFormatType.D24S8:
                     res['PixelSlice'] = 4
+                    res['CastFormats'] = []
+                    res['Format'] = 'R24G8_TYPELESS'
                 case rd.ResourceFormatType.D32S8:
                     res['PixelSlice'] = 4
+                    res['CastFormats'] = []
+                    res['Format'] = 'R32G8X24_TYPELESS'
+
             resources.append(res)
 
     srvs = []
