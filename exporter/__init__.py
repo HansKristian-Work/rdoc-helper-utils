@@ -710,6 +710,16 @@ def export_callback(ctx : qrd.CaptureContext, data):
         }
         cbvs.append(cbv_desc)
 
+    # Try to fish out UAV counters (only works with AMD-style embedded layout for now)
+    used_resource_heap_atomic_counter_candidates = {}
+    used_resource_heap_raw_buffer_access = set()
+    for r in rw:
+        if is_buffer(r.descriptor.type):
+            if is_typed(r.descriptor.type) and r.descriptor.byteSize == 4 and r.descriptor.format.Name() == 'R32_UINT':
+                used_resource_heap_atomic_counter_candidates[r.access.arrayElement] = (r.descriptor.resource, r.descriptor.byteOffset)
+            elif not is_typed(r.descriptor.type):
+                used_resource_heap_raw_buffer_access.add(r.access.arrayElement)
+
     for kind in [ro, rw]:
         for r in kind:
             if is_uav(r.descriptor.type):
@@ -720,6 +730,12 @@ def export_callback(ctx : qrd.CaptureContext, data):
             name = res.name
 
             if res.bindArraySize == 1:
+                continue
+
+            # Do not directly emit UAV counters.
+            is_counter_candidate = r.access.arrayElement in used_resource_heap_atomic_counter_candidates
+            is_raw_candidate = r.access.arrayElement in used_resource_heap_raw_buffer_access
+            if is_counter_candidate and is_raw_candidate and is_buffer(r.descriptor.type) and is_typed(r.descriptor.type):
                 continue
 
             desc = { 'HeapOffset' : r.access.arrayElement }
@@ -763,6 +779,13 @@ def export_callback(ctx : qrd.CaptureContext, data):
                                 if decoded_name[1] == 'StructuredBuffer':
                                     element_size = int(decoded_name[2])
                                     desc['StructureByteStride'] = element_size
+
+                                    if is_counter_candidate:
+                                        counter = used_resource_heap_atomic_counter_candidates[r.access.arrayElement]
+                                        counter_buf = unique_buffer_resources[counter[0]]
+                                        counter_buf_range : BufferRange = counter_buf.find_matching_range(counter[1], True)
+                                        desc['CounterResource'] = counter_buf_range.name + '.rw'
+                                        desc['CounterOffsetInBytes'] = counter[1] - counter_buf_range.start_offset
                                 elif decoded_name[1] == 'ByteAddressBuffer':
                                     desc['Format'] = 'R32_TYPELESS'
                                     desc['Flags'] = 'RAW'
