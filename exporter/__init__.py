@@ -825,12 +825,12 @@ def export_callback(ctx : qrd.CaptureContext, data):
                         desc['ArraySize'] = r.descriptor.numSlices
 
                     if view_type_has_cube_range(r.descriptor.textureType, uav):
-                        desc['First2DArrayFace'] = 0
-                        desc['NumCubes'] = 0
+                        desc['First2DArrayFace'] = r.descriptor.firstSlice
+                        desc['NumCubes'] = r.descriptor.numSlices
 
-                    if view_type_has_wsize(r.descriptor.textureType, uav):
-                        desc['FirstWSlice'] = r.descriptor.firstSlice
-                        desc['WSize'] = r.descriptor.numSlices
+                    #if view_type_has_wsize(r.descriptor.textureType, uav):
+                    #    desc['FirstWSlice'] = r.descriptor.firstSlice
+                    #    desc['WSize'] = r.descriptor.numSlices
             else:
                 print(f'Skipping unknown resource.')
                 continue
