@@ -811,6 +811,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 img = None if r.descriptor.resource == 0 else unique_texture_resources[r.descriptor.resource]
                 desc['Resource'] = (img.name + ('.rw' if uav else '.ro')) if img else 'NULL'
                 desc['ViewDimension'] = to_view_type(r.descriptor.textureType)
+                desc['Format'] = to_d3d12_format(r.descriptor.format, False)
                 if img:
                     if view_type_has_mip_range(r.descriptor.textureType, uav):
                         desc['MostDetailedMip'] = r.descriptor.firstMip
