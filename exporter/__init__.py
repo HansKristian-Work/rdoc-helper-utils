@@ -352,6 +352,10 @@ def to_d3d12_format(fmt : rd.ResourceFormat, is_depth):
         return 'D16_UNORM' if is_depth else 'R16_UNORM'
     elif name.endswith('_SRGB'):
         return name[:-4] + 'UNORM_SRGB'
+    elif name == 'BC6_UFLOAT':
+        return 'BC6H_UF16'
+    elif name == 'BC6_SFLOAT':
+        return 'BC6H_SF16'
     else:
         return name
 
