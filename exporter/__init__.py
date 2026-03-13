@@ -672,7 +672,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
         }
 
         if samp.UseBorder():
-            desc['BorderColor'] = [ x for x in samp.borderColorValue.float ]
+            desc['BorderColor'] = [ x for x in samp.borderColorValue.floatValue ]
         desc_samplers.append(desc)
 
     # Standalone CBVs are always small, so ignore them w.r.t. subrange tracking.
