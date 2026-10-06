@@ -862,7 +862,7 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 if buf_range:
                     root_parameters.append({ 'index' : index, 'type' : kind, 'Resource' : buf_range.name + ('.rw' if uav else '.ro'), 'offset' : offset - buf_range.start_offset })
                 else:
-                    ctx.Extensions().ErrorDialog('Could not find buffer range for resource. Probably a bug in the script.')
+                    ctx.Extensions().ErrorDialog(f'Could not find buffer range for resource {kind}, {pushoffset}. Probably a bug in the script.')
                     return
             else:
                 print(f'Failed to lookup BDA {hex(bda)}, cannot dump parameter {index}')
@@ -878,11 +878,12 @@ def export_callback(ctx : qrd.CaptureContext, data):
                 block = reflection.constantBlocks[c.access.index]
                 if block.fixedBindSetOrSpace == push_set and block.fixedBindNumber == push_desc:
                     unique_buf = unique_buffer_resources[c.descriptor.resource]
+                    offset = c.descriptor.byteOffset
                     buf_range = unique_buf.find_matching_range(offset, False)
                     if buf_range:
-                        root_parameters.append({ 'index' : index, 'type' : 'CBV', 'Resource' : buf_range.name + '.ro', 'offset' : c.descriptor.byteOffset - buf_range.start_offset })
+                        root_parameters.append({ 'index' : index, 'type' : 'CBV', 'Resource' : buf_range.name + '.ro', 'offset' : offset - buf_range.start_offset })
                     else:
-                        ctx.Extensions().ErrorDialog('Could not find buffer range for resource. Probably a bug in the script.')
+                        ctx.Extensions().ErrorDialog(f'Could not find buffer range for resource PushCBV {push_set}, {push_desc}, {offset}. Probably a bug in the script.')
                         return
                     break
 
